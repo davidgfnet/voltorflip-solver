@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voltorb Flip Solver</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --fg: #222; --muted: #777; --card: #fff; --line: #d8d2c4;
+    --danger: 214, 64, 52; --safe: #2e9d55; --pick: #f5b700;
+    --c0: #e07050; --c1: #4aa04a; --c2: #e8a040; --c3: #3a80e8; --c4: #b050e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17191c; --fg: #eee; --muted: #999; --card: #24272b; --line: #3a3e44; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 480px; padding: 12px 16px 32px; background: var(--bg); color: var(--fg);
+         font: 15px/1.35 system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  h1 { font-size: 18px; margin: 0; flex: 1; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+           border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button.on { background: var(--fg); color: var(--bg); }
+  #cam { display: none; margin-bottom: 10px; }
+  #cam.on { display: block; }
+  .feeds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 4px; }
+  video, #view { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; background: #000; }
+  #view { image-rendering: pixelated; }
+  #camStatus { font-weight: 600; } .ok { color: var(--safe); } .bad { color: rgb(var(--danger)); }
+
+  #board { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+  .cell { aspect-ratio: 1; border-radius: 8px; border: 2px solid transparent; background: var(--card);
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          padding: 0; font-variant-numeric: tabular-nums; position: relative; }
+  .cell { overflow: hidden; }
+  .parts { display: grid; width: 100%; height: 100%; gap: 1px; }
+  .parts.n2 { grid-template-rows: 1fr 1fr; }
+  .parts.n3 { grid-template-rows: 1fr 1fr 1fr; }
+  .parts.n4 { grid-template: 1fr 1fr / 1fr 1fr; }
+  .part { display: flex; align-items: center; justify-content: center; gap: 3px; color: var(--fg);
+          font-size: 11px; font-variant-numeric: tabular-nums; }
+  .part b { font-size: 14px; }
+  .cell.sure { background: var(--safe); color: #fff; font-size: 24px; font-weight: 800; }
+  .cell.sure.volt { background: rgb(var(--danger)); }
+  .cell.known { background: #a87d6e; color: #fff; font-size: 24px; font-weight: 800; }
+  .cell.volt { background: rgb(var(--danger)); }
+  .cell.dull { opacity: .45; }
+  .cell.pick { border-color: var(--pick); box-shadow: 0 0 0 2px var(--pick); }
+  .cell.sel { outline: 3px solid var(--fg); outline-offset: 1px; }
+  .clue { aspect-ratio: 1; border-radius: 8px; display: grid; grid-template-rows: 1fr 1fr; overflow: hidden; color: #111; }
+  .clue input { width: 100%; min-width: 0; border: 0; background: transparent; text-align: center;
+                font: 700 15px system-ui, sans-serif; color: inherit; padding: 0; }
+  .clue input + input { background: rgba(255, 255, 255, .55); }
+  .clue input::placeholder { color: rgba(0, 0, 0, .35); }
+
+  #picker { display: none; gap: 6px; margin-top: 10px; }
+  #picker.on { display: flex; }
+  #picker button { flex: 1; font-weight: 700; padding: 10px 0; }
+  #msg { margin-top: 12px; min-height: 2.7em; }
+  .legend { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voltorb Flip Solver</h1>
+  <button id="camBtn">Camera</button>
+  <button id="reset">New board</button>
+</header>
+
+<div id="cam">
+  <div class="feeds"><video id="video" playsinline muted autoplay></video><canvas id="view" width="512" height="384"></canvas></div>
+  <span id="camStatus">Starting…</span> <span class="legend">Left: camera. Right: detected screen. Keep the whole bottom screen in view.</span>
+</div>
+
+<div id="board"></div>
+<div id="picker">
+  <button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button>
+  <button data-v="0">V</button><button data-v="">?</button>
+</div>
+<div id="msg"></div>
+<div class="legend">Each card lists its possible values with their chances. Green = certain. Faded = only 1 or Voltorb left, no need to flip. Gold = best next flip.
+  Tap a card to enter what you flipped. Clues: points on top, Voltorbs below.</div>
+
+<script>
+// ---- Vision: DS bottom screen -> clues + cards (needs global `cv`) ----
+const W = 256, H = 192, S = 4, Z = 2;    // screen px, warp oversampling, matching res
+const P = 32, CR = 7;                    // cell pitch, card sampling half-size (screen px)
+// Board origin per game layout: board right of a coin panel, or HGSS (board left, Open/Memo right)
+const LAYOUTS = [[64, 0], [4, 4]];
+const FONT = {                           // 6x8 clue font, '#' = ink
+  0: ['.####.','######','##..##','##..##','##..##','##..##','######','.####.'],
+  1: ['..##..','.###..','.###..','..##..','..##..','..##..','.####.','.####.'],
+  2: ['.####.','######','##..##','...###','..###.','.###..','######','######'],
+  3: ['.####.','######','##..##','..####','..####','##..##','######','.####.'],
+  4: ['##....','##.##.','##.##.','##.##.','######','######','...##.','...##.'],
+  5: ['######','######','##....','#####.','....##','##..##','######','.####.'],
+  6: ['.####.','######','##....','#####.','######','##..##','######','.####.'],
+  7: ['######','######','##..##','...##.','..##..','..##..','..##..','..##..'],
+  8: ['.####.','######','##..##','######','######','##..##','######','.####.'],
+  9: ['.####.','######','##..##','######','.#####','....##','######','.####.'], // synthesized
+};
+
+const norm = a => {
+  let m = 0; for (const v of a) m += v; m /= a.length;
+  let n = 0; const d = a.map(v => (v -= m, n += v * v, v)); n = Math.sqrt(n) || 1;
+  return d.map(v => v / n);
+};
+const up = r => r.flatMap(l => Array(Z).fill([...l].flatMap(c => Array(Z).fill(c === '#' ? 0 : 1)))).flat();
+const FONT_T = Object.fromEntries(Object.entries(FONT).map(([k, r]) => [k, { w: 6, h: 8, t: norm(up(r)) }]));
+
+// Clue glyph positions (top-left, screen px) for board origin [x, y]
+const clueSpots = ([x, y]) => [0, 1, 2, 3, 4]
+  .map(i => ({ tens: [x + 174, y + 4 + P * i], ones: [x + 182, y + 4 + P * i], volt: [x + 182, y + 17 + P * i] }))
+  .concat([0, 1, 2, 3, 4].map(j => ({ tens: [x + 13 + P * j, y + 165], ones: [x + 21 + P * j, y + 165], volt: [x + 21 + P * j, y + 178] })));
+
+// Best template match around (x,y), searching +-1.5 screen px; v = V channel at Z res
+function match(v, [x, y], tpls, keys) {
+  let best = { k: null, s: -1 };
+  const gw = W * Z, X = x * Z, Y = y * Z, { w, h } = tpls[keys[0]];
+  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+    const p = [];
+    for (let r = 0; r < h * Z; r++) for (let c = 0; c < w * Z; c++) p.push(v[(Y + dy + r) * gw + X + dx + c] ?? 0);
+    const n = norm(p);
+    for (const k of keys) {
+      const t = tpls[k].t; let s = 0;
+      for (let i = 0; i < n.length; i++) s += n[i] * t[i];
+      if (s > best.s) best = { k, s };
+    }
+  }
+  return best;
+}
+
+function readClues(v, o) {
+  let score = 1, rowScore = 1;
+  const ls = clueSpots(o).map((L, i) => {
+    const t = match(v, L.tens, FONT_T, ['0', '1']), u = match(v, L.ones, FONT_T, [...'0123456789']),
+          b = match(v, L.volt, FONT_T, [...'012345']);
+    score = Math.min(score, t.s, u.s, b.s);
+    if (i < 5) rowScore = score;
+    return { sum: +t.k * 10 + +u.k, volt: +b.k };
+  });
+  const tot = (a, k) => a.reduce((s, l) => s + l[k], 0), R = ls.slice(0, 5), C = ls.slice(5);
+  const ok = tot(R, 'sum') === tot(C, 'sum') && tot(R, 'volt') === tot(C, 'volt');
+  return { rows: R, cols: C, score, rowScore, ok, o, rank: ok ? 2 + score : rowScore };
+}
+
+// Cards: 0 = Voltorb, 1-3 = points, null = face down / unreadable.
+// Style-independent: face down = mostly green, Voltorb = red, else a digit in the clue font.
+function readCards(v, rgba, [x0, y0]) {
+  const gw = W * Z;
+  return [0, 1, 2, 3, 4].map(r => [0, 1, 2, 3, 4].map(c => {
+    const cx = x0 + P * c + 16, cy = y0 + P * r + 16;
+    let green = 0, red = 0, n = 0;
+    for (let y = (cy - CR) * Z; y < (cy + CR) * Z; y++) for (let x = (cx - CR) * Z; x < (cx + CR) * Z; x++) {
+      const i = 4 * (y * gw + x), R = rgba[i], G = rgba[i + 1], B = rgba[i + 2];
+      green += G > R + 20 && G >= B - 10; red += R > 1.6 * G && R > 1.6 * B && R > 100; n++;
+    }
+    if (green / n > 0.4) return null;
+    if (red / n > 0.12) return 0;
+    const m = match(v, [cx - 3, cy - 4], FONT_T, ['1', '2', '3']);
+    return m.s > 0.5 ? +m.k : null;
+  }));
+}
+
+// Screen = large bright region against the dark bezel. Corners = intersections
+// of the 4 longest hull edges, so a corner slightly cut off by the frame still works.
+function screenQuads(src) {
+  const k = 640 / Math.max(src.cols, src.rows);
+  const sm = new cv.Mat(), hsv = new cv.Mat(), ch = new cv.MatVector(), bw = new cv.Mat();
+  cv.resize(src, sm, new cv.Size(0, 0), k, k, cv.INTER_AREA);
+  cv.cvtColor(sm, hsv, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+  cv.split(hsv, ch);
+  const v = ch.get(2), sorted = Uint8Array.from(v.data).sort();
+  cv.threshold(v, bw, 0.35 * sorted[Math.floor(sorted.length * 0.95)], 255, cv.THRESH_BINARY);
+  const kern = cv.Mat.ones(5, 5, cv.CV_8U);
+  cv.morphologyEx(bw, bw, cv.MORPH_CLOSE, kern);
+  const cs = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(bw, cs, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  const out = [], minA = sm.rows * sm.cols * 0.05;
+  for (let i = 0; i < cs.size(); i++) {
+    const c = cs.get(i);
+    if (cv.contourArea(c) > minA) {
+      const hull = new cv.Mat(), ap = new cv.Mat();
+      cv.convexHull(c, hull);
+      cv.approxPolyDP(hull, ap, 0.01 * cv.arcLength(hull, true), true);
+      const q = quadFromPoly([...Array(ap.rows)].map((_, j) => [ap.data32S[2 * j], ap.data32S[2 * j + 1]]));
+      if (q) out.push(q.map(([x, y]) => [x / k, y / k]));
+      [hull, ap].forEach(m => m.delete());
+    }
+    c.delete();
+  }
+  [sm, hsv, ch, v, bw, kern, cs, hier].forEach(m => m.delete());
+  return out;
+}
+
+function quadFromPoly(p) {
+  if (p.length < 4) return null;
+  const n = p.length, len = i => Math.hypot(p[(i + 1) % n][0] - p[i][0], p[(i + 1) % n][1] - p[i][1]);
+  const edges = [...Array(n).keys()].sort((a, b) => len(b) - len(a)).slice(0, 4).sort((a, b) => a - b);
+  const line = i => [p[i], p[(i + 1) % n]];
+  const meet = ([a, b], [c, d]) => {
+    const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]], den = r[0] * s[1] - r[1] * s[0];
+    if (Math.abs(den) < 1e-6) return null;
+    const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+    return [a[0] + t * r[0], a[1] + t * r[1]];
+  };
+  const q = edges.map((e, i) => meet(line(e), line(edges[(i + 1) % 4])));
+  return q.every(Boolean) ? q : null;
+}
+
+function orient(pts) {                   // clockwise, long edge first; both 180° options
+  const cx = pts.reduce((s, p) => s + p[0], 0) / 4, cy = pts.reduce((s, p) => s + p[1], 0) / 4;
+  pts = [...pts].sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+  const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  if (d(pts[0], pts[1]) < d(pts[1], pts[2])) pts.push(pts.shift());
+  return [pts, [pts[2], pts[3], pts[0], pts[1]]];
+}
+
+function warp(src, pts) {                // -> RGBA Mat at Z x screen res (caller deletes)
+  const from = cv.matFromArray(4, 1, cv.CV_32FC2, pts.flat());
+  const to = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, W * S, 0, W * S, H * S, 0, H * S]);
+  const M = cv.getPerspectiveTransform(from, to), big = new cv.Mat(), out = new cv.Mat();
+  cv.warpPerspective(src, big, M, new cv.Size(W * S, H * S));
+  cv.resize(big, out, new cv.Size(W * Z, H * Z), 0, 0, cv.INTER_AREA);
+  [from, to, M, big].forEach(m => m.delete());
+  return out;
+}
+
+const valueChannel = rgba => {           // V = max(R,G,B): dark ink vs any bright background
+  const v = new Uint8Array(rgba.length / 4);
+  for (let i = 0; i < v.length; i++) v[i] = Math.max(rgba[4 * i], rgba[4 * i + 1], rgba[4 * i + 2]);
+  return v;
+};
+
+// Main: RGBA frame Mat -> { found, partial, score, rows, cols, cards, view (RGBA Mat | null) }
+// partial: bottom clues hidden (e.g. by a message box); only rows + cards are valid.
+function analyze(src) {
+  let best = { found: false, score: -1, rank: -1, view: null };
+  for (const q of screenQuads(src)) for (const pts of orient(q)) {
+    const m = warp(src, pts), v = valueChannel(m.data);
+    let keep = false;
+    for (const o of LAYOUTS) {
+      const r = readClues(v, o);
+      if (r.rank > best.rank) {
+        if (best.view && best.view !== m) best.view.delete();
+        best = { ...r, v, view: m }; keep = true;
+      }
+    }
+    if (!keep) m.delete();
+  }
+  best.found = !!best.ok && best.score > 0.35;   // the totals cross-check guards against misreads
+  best.partial = !best.found && best.rowScore > 0.5;
+  if (best.found || best.partial) best.cards = readCards(best.v, best.view.data, best.o);
+  delete best.v;
+  return best;
+}
+</script>
+<script>
+// ---- Solver: exact per-cell probabilities over all boards consistent with clues ----
+// Same model as mrtenda's voltorbflip.com: every consistent board equally likely;
+// recommend the unrevealed card that may hold a 2/3 with the lowest Voltorb chance.
+// Values: 0 = Voltorb, 1..3 = points, null = unknown.
+
+function rowCombos({ sum, volt }, known) {
+  const out = [], cur = [];
+  (function rec(i, p, v) {
+    if (i === 5) { if (p === sum && v === volt) out.push(cur.slice()); return; }
+    for (const x of known[i] == null ? [0, 1, 2, 3] : [known[i]]) {
+      const np = p + x, nv = v + (x === 0);
+      if (np <= sum && nv <= volt) { cur[i] = x; rec(i + 1, np, nv); }
+    }
+  })(0, 0, 0);
+  return out;
+}
+
+// rows, cols: [{sum, volt}] x5; known: 5x5 of value|null
+// -> { total, prob[r][c] = [pV, p1, p2, p3] } or null if inconsistent
+function solve(rows, cols, known) {
+  const combos = rows.map((R, r) => rowCombos(R, known[r]));
+  const key = s => s.reduce((k, [p, v]) => k * 96 + p * 6 + v, 0);
+  const memo = [0, 1, 2, 3, 4, 5].map(() => new Map());
+
+  const sub = (s, c) => {                          // column remainders after a row combo
+    const n = [];
+    for (let j = 0; j < 5; j++) {
+      const p = s[j][0] - c[j], v = s[j][1] - (c[j] === 0);
+      if (p < 0 || v < 0) return null;
+      n.push([p, v]);
+    }
+    return n;
+  };
+
+  function ways(i, s) {                            // completions of rows i..4 from state s
+    const rem = 5 - i;
+    for (const [p, v] of s) if (v > rem || p < rem - v || p > 3 * (rem - v)) return 0;
+    if (i === 5) return 1;
+    const k = key(s);
+    if (memo[i].has(k)) return memo[i].get(k);
+    let n = 0;
+    for (const c of combos[i]) { const t = sub(s, c); if (t) n += ways(i + 1, t); }
+    memo[i].set(k, n);
+    return n;
+  }
+
+  const start = cols.map(c => [c.sum, c.volt]);
+  const total = ways(0, start);
+  if (!total) return null;
+
+  const cnt = [...Array(5)].map(() => [...Array(5)].map(() => [0, 0, 0, 0]));
+  let layer = new Map([[key(start), { s: start, n: 1 }]]);
+  for (let i = 0; i < 5; i++) {                    // forward counts x backward completions
+    const next = new Map();
+    for (const { s, n } of layer.values()) for (const c of combos[i]) {
+      const t = sub(s, c); if (!t) continue;
+      const w = ways(i + 1, t); if (!w) continue;
+      for (let j = 0; j < 5; j++) cnt[i][j][c[j]] += n * w;
+      const k = key(t), e = next.get(k);
+      e ? (e.n += n) : next.set(k, { s: t, n });
+    }
+    layer = next;
+  }
+  return { total, prob: cnt.map(r => r.map(a => a.map(x => x / total))) };
+}
+
+// -> { pick: [r, c] | null, won, safe: [[r,c]...] }
+function recommend(sol, known) {
+  let pick = null, best = [2, 0], safe = [], won = true;
+  sol.prob.forEach((row, r) => row.forEach(([pv, , p2, p3], c) => {
+    if (known[r][c] != null || p2 + p3 === 0) return;      // revealed or can't help
+    won = false;
+    if (pv === 0) safe.push([r, c]);
+    if (pv < best[0] || (pv === best[0] && p2 + p3 > best[1])) { best = [pv, p2 + p3]; pick = [r, c]; }
+  }));
+  return { pick, won, safe };
+}
+</script>
+<script>
+// ---- UI ----
+const $ = id => document.getElementById(id);
+const state = {
+  rows: [...Array(5)].map(() => ({ sum: null, volt: null })),
+  cols: [...Array(5)].map(() => ({ sum: null, volt: null })),
+  known: [...Array(5)].map(() => Array(5).fill(null)),
+  sel: null,
+};
+const pct = x => x < 0.005 ? '<1%' : Math.round(x * 100) + '%';
+const LABEL = ['V', 1, 2, 3], TINT = ['214, 64, 52', '150, 150, 150', '58, 128, 232', '232, 160, 64'];
+const clueComplete = () => [...state.rows, ...state.cols].every(l => l.sum != null && l.volt != null);
+
+// Build grid: 5x5 cards + clue boxes on the right and bottom
+const board = $('board'), cells = [];
+for (let r = 0; r < 6; r++) for (let c = 0; c < 6; c++) {
+  if (r < 5 && c < 5) {
+    const b = document.createElement('button');
+    b.className = 'cell'; b.onclick = () => select(r, c);
+    board.append(b); (cells[r] ??= [])[c] = b;
+  } else if (r === 5 && c === 5) board.append(document.createElement('div'));
+  else {
+    const line = r === 5 ? state.cols[c] : state.rows[r], i = r === 5 ? c : r, d = document.createElement('div');
+    d.className = 'clue'; d.style.background = `var(--c${i})`;
+    for (const k of ['sum', 'volt']) {
+      const inp = document.createElement('input');
+      inp.inputMode = 'numeric'; inp.placeholder = k === 'sum' ? 'pts' : 'V';
+      inp.oninput = () => { line[k] = inp.value === '' ? null : +inp.value; render(); };
+      line[k + 'El'] = inp; d.append(inp);
+    }
+    board.append(d);
+  }
+}
+
+function select(r, c) {
+  state.sel = state.sel && state.sel[0] === r && state.sel[1] === c ? null : [r, c];
+  $('picker').classList.toggle('on', !!state.sel);
+  render();
+}
+$('picker').onclick = e => {
+  const v = e.target.dataset.v;
+  if (v === undefined || !state.sel) return;
+  const [r, c] = state.sel;
+  state.known[r][c] = v === '' ? null : +v;
+  state.sel = null; $('picker').classList.remove('on');
+  render();
+};
+$('reset').onclick = () => {
+  for (const l of [...state.rows, ...state.cols]) { l.sum = l.volt = null; l.sumEl.value = l.voltEl.value = ''; }
+  state.known.forEach(r => r.fill(null)); state.sel = null; $('picker').classList.remove('on');
+  render();
+};
+
+function render() {
+  const msg = $('msg');
+  let sol = null, rec = null;
+  if (clueComplete()) {
+    sol = solve(state.rows, state.cols, state.known);
+    if (sol) rec = recommend(sol, state.known);
+  }
+  cells.forEach((row, r) => row.forEach((b, c) => {
+    const k = state.known[r][c], p = sol?.prob[r][c];
+    const isSel = state.sel && state.sel[0] === r && state.sel[1] === c;
+    b.className = 'cell' + (isSel ? ' sel' : '');
+    if (k != null) {
+      b.classList.add('known'); if (k === 0) b.classList.add('volt');
+      b.innerHTML = k === 0 ? 'V' : k;
+    } else if (p) {
+      const vals = [0, 1, 2, 3].filter(v => p[v] > 0);
+      if (rec?.pick && rec.pick[0] === r && rec.pick[1] === c) b.classList.add('pick');
+      if (vals.length === 1) {                               // certain
+        b.classList.add('sure'); if (vals[0] === 0) b.classList.add('volt');
+        b.innerHTML = LABEL[vals[0]];
+      } else {                                               // one tile per possible value
+        if (!p[2] && !p[3]) b.classList.add('dull');         // only 1 or V left: no need to flip
+        b.innerHTML = `<div class="parts n${vals.length}">` + vals.map(v =>
+          `<div class="part" style="background: rgba(${TINT[v]}, ${0.15 + 0.6 * p[v]})"><b>${LABEL[v]}</b>${pct(p[v])}</div>`).join('') + '</div>';
+      }
+    } else b.innerHTML = '';
+  }));
+
+  if (!clueComplete()) msg.textContent = 'Enter all 10 clues, or point the camera at the bottom screen.';
+  else if (!sol) msg.innerHTML = '<b class="bad">No board matches these clues and cards.</b> Check for a misread value.';
+  else if (state.known.flat().includes(0)) msg.innerHTML = '<b class="bad">Voltorb flipped.</b> Tap “New board” for the next round.';
+  else if (rec.won) msg.innerHTML = '<b class="ok">All 2s and 3s found — round cleared!</b>';
+  else {
+    const [r, c] = rec.pick, [pv, p1, p2, p3] = sol.prob[r][c];
+    msg.innerHTML = `Flip <b>row ${r + 1}, col ${c + 1}</b>: Voltorb ${pct(pv)} · 1: ${pct(p1)} · 2: ${pct(p2)} · 3: ${pct(p3)}`
+      + `<br><span class="legend">${sol.total.toLocaleString()} possible boards${rec.safe.length ? ` · ${rec.safe.length} safe card(s)` : ''}</span>`;
+  }
+}
+
+// ---- Camera ----
+let stream = null, prev = null, cvReady = null;
+const loadCV = () => cvReady ??= new Promise((ok, fail) => {
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js';
+  s.onload = async () => {
+    if (cv instanceof Promise) cv = await cv;
+    cv.Mat ? ok() : (cv.onRuntimeInitialized = ok);
+  };
+  s.onerror = () => fail(new Error('could not load OpenCV'));
+  document.head.append(s);
+});
+
+// Clues apply once two frames agree on all 10; each card applies once two frames agree on it.
+function applyReading(r, p) {
+  const clues = [...r.rows, ...r.cols], lines = [...state.rows, ...state.cols];
+  if (JSON.stringify(clues) === JSON.stringify([...p.rows, ...p.cols])) {
+    const newBoard = clues.some((l, i) => l.sum !== lines[i].sum || l.volt !== lines[i].volt);
+    if (newBoard) state.known.forEach(row => row.fill(null));
+    clues.forEach((l, i) => {
+      Object.assign(lines[i], { sum: l.sum, volt: l.volt });
+      lines[i].sumEl.value = l.sum; lines[i].voltEl.value = l.volt;
+    });
+    applyCards(r, p);
+  }
+  render();
+}
+const applyCards = (r, p) =>
+  r.cards.forEach((row, i) => row.forEach((v, j) => { if (v != null && v === p.cards[i][j]) state.known[i][j] = v; }));
+// Bottom clues hidden (message box): only trust cards if the row clues match the current board
+const sameRows = r => r.rows.every((l, i) => l.sum === state.rows[i].sum && l.volt === state.rows[i].volt);
+
+const grab = document.createElement('canvas'), gctx = grab.getContext('2d', { willReadFrequently: true });
+function tick() {
+  if (!stream) return;
+  const video = $('video');
+  if (video.readyState >= 2) {
+    grab.width = video.videoWidth; grab.height = video.videoHeight;
+    gctx.drawImage(video, 0, 0);
+    const src = cv.imread(grab), r = analyze(src);
+    src.delete();
+    if (r.view) { cv.imshow($('view'), r.view); r.view.delete(); }
+    const partial = r.partial && clueComplete() && sameRows(r);
+    $('camStatus').textContent = r.found ? `Board found (${r.score.toFixed(2)})`
+      : partial ? 'Partly hidden — updating cards' : r.view ? `Low confidence (${r.score.toFixed(2)})` : 'Not found';
+    $('camStatus').className = r.found || partial ? 'ok' : 'bad';
+    if (r.found && prev) applyReading(r, prev);
+    else if (partial && prev) { applyCards(r, prev); render(); }
+    prev = r.found || partial ? r : null;
+  }
+  setTimeout(tick, 100);
+}
+
+$('camBtn').onclick = async () => {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop()); stream = null;
+    $('cam').classList.remove('on'); $('camBtn').classList.remove('on');
+    return;
+  }
+  $('cam').classList.add('on'); $('camBtn').classList.add('on');
+  try {
+    $('camStatus').textContent = 'Loading OpenCV…';
+    await loadCV();
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    $('video').srcObject = stream;
+    await $('video').play();
+    $('camStatus').textContent = 'Looking…';
+    tick();
+  } catch (e) {
+    $('camStatus').textContent = 'Camera error: ' + e.message; $('camStatus').className = 'bad';
+    $('camBtn').classList.remove('on');
+  }
+};
+
+render();
+</script>
+</body>
+</html>
