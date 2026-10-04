@@ -4,6 +4,8 @@ PLATFORM_VERSION     ?= android-34
 JAVAC_FLAGS          ?= --release 11
 KEYSTORE             ?= debug.keystore
 
+export KS_PASS       ?= android
+
 ifeq ($(strip $(ANDROID_SDK)),)
   $(error ANDROID_SDK is not set - e.g. `make ANDROID_SDK=$$HOME/android-sdk`)
 endif
@@ -46,7 +48,7 @@ debug.keystore:
 
 $(APK): $(BUILD)/unsigned.apk $(KEYSTORE)
 	$(ZIPALIGN) -f 4 $(BUILD)/unsigned.apk $(BUILD)/aligned.apk
-	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass pass:android --out $@ $(BUILD)/aligned.apk
+	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass env:KS_PASS --out $@ $(BUILD)/aligned.apk
 	@ls -lh $@
 
 install: $(APK)

@@ -1,0 +1,28 @@
+
+name: build
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: SDK packages
+        run: yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0"
+      - name: Build
+        env: { KS_PASS: '${{ secrets.KEYSTORE_PASS }}' }
+        run: |
+          cd android
+          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > release.keystore
+          make ANDROID_SDK=$ANDROID_SDK_ROOT KEYSTORE=release.keystore
+          rm release.keystore
+      - uses: actions/upload-artifact@v4
+        with: { name: voltorb-apk, path: voltorb.apk }
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: gh release create "$GITHUB_REF_NAME" android/voltorb.apk --generate-notes
+
